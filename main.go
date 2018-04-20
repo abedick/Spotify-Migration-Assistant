@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
+	"time"
 
+	"./common"
 	"./config"
 	"github.com/zmb3/spotify"
 )
@@ -22,14 +23,50 @@ var (
 )
 
 func main() {
-	fmt.Println("+---------------------------------------------+")
-	fmt.Println("|-- Spotify Migration Assistant --------------|")
-	fmt.Println("+---------------------------------------------+")
+
+	common.SectionTitle("Spotify Migration Assistang")
 
 	config_param_alias := []string{"Client ID", "Client Secret"}
 	config_param_mapped := []string{"client_id", "client_secret"}
 
 	global_settings = config.Load_config(CONFIG_FILE, config_param_alias, config_param_mapped)
+
+	// client := authorizationHandler()
+
+	common.SectionTitle("Step 1 : Gather Old Account Information")
+
+	SavePlaylistsData()
+
+	// for i := 0; i < 20; i++ {
+	// 	lim := 20
+	// 	off := 20 * i
+
+	// 	opt := spotify.Options{
+	// 		Limit:  &lim,
+	// 		Offset: &off,
+	// 	}
+
+	// 	playlist_list, err := client.CurrentUsersPlaylistsOpt(&opt)
+
+	// 	if err != nil {
+	// 		fmt.Println("Playlist Error!")
+	// 		fmt.Fprintf(os.Stderr, err.Error())
+	// 		return
+	// 	}
+
+	// 	for _, playlist := range playlist_list.Playlists {
+	// 		fmt.Println(playlist.Name, " ", playlist.ID)
+	// 	}
+	// }
+
+	// fmt.Println("User ID:", user.ID)
+	// fmt.Println("Display name:", user.DisplayName)
+	// fmt.Println("Spotify URI:", string(user.URI))
+	// fmt.Println("Endpoint:", user.Endpoint)
+	// fmt.Println("Followers:", user.Followers.Count)
+}
+
+func authorizationHandler() spotify.Client {
 
 	auth.SetAuthInfo(global_settings["client_id"], global_settings["client_secret"])
 
@@ -38,6 +75,8 @@ func main() {
 		log.Println("Got request for:", r.URL.String())
 	})
 	go http.ListenAndServe(":8080", nil)
+
+	global_settings = config.Update_config(global_settings, "session_date", time.Now().String())
 
 	url := auth.AuthURL(state)
 	fmt.Println("Please log in to Spotify by visiting the following page in your browser:", url)
@@ -52,57 +91,9 @@ func main() {
 	}
 	fmt.Println("You are logged in as:", user.ID)
 
-	// // auth := spotify.NewAuthenticator("http://mysite.com/callback/", spotify.ScopeUserReadPrivate)
-	// // auth.SetAuthInfo(global_settings["client_id"], global_settings["client_secret"])
-
-	// config := &clientcredentials.Config{
-	// 	ClientID:     global_settings["client_id"],
-	// 	ClientSecret: global_settings["client_secret"],
-	// 	TokenURL:     spotify.TokenURL,
-	// }
-	// token, err := config.Token(context.Background())
-	// if err != nil {
-	// 	log.Fatalf("couldn't get token: %v", err)
-	// }
-
-	// client := spotify.Authenticator{}.NewClient(token)
-	// // user, err := client.GetUsersPublicProfile(spotify.ID("1224459409"))
-	// user, err := client.CurrentUser()
-	// if err != nil {
-	// 	fmt.Println("User Error!")
-	// 	fmt.Fprintf(os.Stderr, err.Error())
-	// 	return
-	// }
-
-	for i := 0; i < 20; i++ {
-		lim := 20
-
-		off := 20 * i
-
-		opt := spotify.Options{
-			Limit:  &lim,
-			Offset: &off,
-		}
-
-		playlist_list, err := client.CurrentUsersPlaylistsOpt(&opt)
-
-		if err != nil {
-			fmt.Println("Playlist Error!")
-			fmt.Fprintf(os.Stderr, err.Error())
-			return
-		}
-
-		for _, playlist := range playlist_list.Playlists {
-			fmt.Println(playlist.Name)
-		}
-	}
-
-	// fmt.Println("User ID:", user.ID)
-	// fmt.Println("Display name:", user.DisplayName)
-	// fmt.Println("Spotify URI:", string(user.URI))
-	// fmt.Println("Endpoint:", user.Endpoint)
-	// fmt.Println("Followers:", user.Followers.Count)
+	return *client
 }
+
 func completeAuth(w http.ResponseWriter, r *http.Request) {
 	tok, err := auth.Token(state, r)
 	if err != nil {
@@ -117,4 +108,8 @@ func completeAuth(w http.ResponseWriter, r *http.Request) {
 	client := auth.NewClient(tok)
 	fmt.Fprintf(w, "Login Completed!")
 	ch <- &client
+}
+
+func SavePlaylistsData() {
+
 }

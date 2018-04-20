@@ -26,6 +26,14 @@ func Load_config(file string, param_alias []string, param_map []string) map[stri
 	return settings
 }
 
+func Update_config(config map[string]string, param_name string, param_value string) map[string]string {
+	config[param_name] = param_value
+
+	save_config(config)
+
+	return config
+}
+
 func setup() map[string]string {
 
 	tmp_config := make(map[string]string)

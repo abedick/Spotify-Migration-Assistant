@@ -84,5 +84,26 @@ func read_config() (map[string]string, error) {
 		key_value := strings.Split(scanner.Text(), "=")
 		conf[key_value[0]] = key_value[1]
 	}
+
+	update := false
+
+	/* Make sure that all config variables needed were read */
+	for i, value := range MAP {
+
+		if _, ok := conf[value]; !ok {
+
+			var value string
+			fmt.Print(ALIAS[i], ": ")
+			fmt.Scanln(&value)
+			conf[MAP[i]] = value
+
+			update = true
+		}
+	}
+
+	if update {
+		save_config(conf)
+	}
+
 	return conf, nil
 }

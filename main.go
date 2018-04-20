@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"time"
+	"os"
+	"regexp"
 
 	"./common"
 	"./config"
@@ -16,54 +19,29 @@ var global_settings map[string]string
 
 const redirectURI = "http://localhost:8080/callback"
 
+var global_client spotify.Client
+
 var (
-	auth  = spotify.NewAuthenticator(redirectURI, spotify.ScopeUserReadPrivate)
+	auth = spotify.NewAuthenticator(redirectURI,
+		spotify.ScopeUserReadPrivate,
+		spotify.ScopePlaylistReadPrivate)
 	ch    = make(chan *spotify.Client)
 	state = "abc123"
 )
 
 func main() {
 
-	common.SectionTitle("Spotify Migration Assistang")
+	global_settings = config.Load_config(CONFIG_FILE,
+		[]string{"Client ID", "Client Secret", "Old User"},
+		[]string{"client_id", "client_secret", "old_user"})
 
-	config_param_alias := []string{"Client ID", "Client Secret"}
-	config_param_mapped := []string{"client_id", "client_secret"}
+	common.SectionTitle("Spotify Migration Assistant")
 
-	global_settings = config.Load_config(CONFIG_FILE, config_param_alias, config_param_mapped)
-
-	// client := authorizationHandler()
+	global_client = authorizationHandler()
 
 	common.SectionTitle("Step 1 : Gather Old Account Information")
-
 	SavePlaylistsData()
 
-	// for i := 0; i < 20; i++ {
-	// 	lim := 20
-	// 	off := 20 * i
-
-	// 	opt := spotify.Options{
-	// 		Limit:  &lim,
-	// 		Offset: &off,
-	// 	}
-
-	// 	playlist_list, err := client.CurrentUsersPlaylistsOpt(&opt)
-
-	// 	if err != nil {
-	// 		fmt.Println("Playlist Error!")
-	// 		fmt.Fprintf(os.Stderr, err.Error())
-	// 		return
-	// 	}
-
-	// 	for _, playlist := range playlist_list.Playlists {
-	// 		fmt.Println(playlist.Name, " ", playlist.ID)
-	// 	}
-	// }
-
-	// fmt.Println("User ID:", user.ID)
-	// fmt.Println("Display name:", user.DisplayName)
-	// fmt.Println("Spotify URI:", string(user.URI))
-	// fmt.Println("Endpoint:", user.Endpoint)
-	// fmt.Println("Followers:", user.Followers.Count)
 }
 
 func authorizationHandler() spotify.Client {
@@ -75,8 +53,6 @@ func authorizationHandler() spotify.Client {
 		log.Println("Got request for:", r.URL.String())
 	})
 	go http.ListenAndServe(":8080", nil)
-
-	global_settings = config.Update_config(global_settings, "session_date", time.Now().String())
 
 	url := auth.AuthURL(state)
 	fmt.Println("Please log in to Spotify by visiting the following page in your browser:", url)
@@ -112,4 +88,107 @@ func completeAuth(w http.ResponseWriter, r *http.Request) {
 
 func SavePlaylistsData() {
 
+	user, err := global_client.CurrentUser()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("You are logged in as:", user.ID)
+
+	var playlist_arr []spotify.SimplePlaylist
+
+	for i := 0; i < 3; i++ {
+		lim := 50
+
+		off := i * lim
+
+		if i == 0 {
+			off = 0
+		}
+
+		opt := spotify.Options{
+			Limit:  &lim,
+			Offset: &off,
+		}
+
+		fmt.Println("\tOffset: ", off)
+
+		playlist_list, err := global_client.CurrentUsersPlaylistsOpt(&opt)
+
+		if err != nil {
+			fmt.Println("Playlist Error!")
+			fmt.Fprintf(os.Stderr, err.Error())
+			return
+		}
+
+		if playlist_list != nil {
+			for _, playlist := range playlist_list.Playlists {
+				// fmt.Println(playlist.Name, " ", playlist.Tracks.Total)
+				playlist_arr = append(playlist_arr, playlist)
+			}
+		} else {
+			fmt.Println("All playlists gathered!")
+		}
+	}
+
+	CreateDir("tmp")
+
+	file, err := os.Create("tmp/master.json")
+	writer := bufio.NewWriter(file)
+
+	for _, playlist := range playlist_arr {
+
+		if err != nil {
+			panic(err)
+		}
+		defer file.Close()
+
+		info, _ := json.MarshalIndent(playlist, "", "    ")
+
+		fmt.Fprintln(writer, string(info))
+
+		if playlist.Owner.ID == user.ID {
+			track_filepath := fmt.Sprintf("tmp/%s_tracks.json", filenameHandler(playlist.Name))
+			track_file, _ := os.Create(track_filepath)
+
+			track_writer := bufio.NewWriter(track_file)
+
+			opts := spotify.Options{}
+			fields := "items(added_at,track(name,id))"
+
+			tracks, err := global_client.GetPlaylistTracksOpt(user.ID, playlist.ID, &opts, fields)
+
+			if err != nil {
+				panic(err)
+			}
+
+			for _, track := range tracks.Tracks {
+
+				track_listing, _ := json.MarshalIndent(track, "", "    ")
+				fmt.Fprintln(track_writer, string(track_listing))
+			}
+
+			defer track_file.Close()
+		}
+	}
+}
+
+/* Written by Siong-Ui Te, siongui.github.io */
+func CreateDir(dir string) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, 0755)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func filenameHandler(filename string) string {
+
+	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
+	if err != nil {
+		log.Fatal(err)
+	}
+	processedString := reg.ReplaceAllString(filename, "")
+
+	return processedString
 }

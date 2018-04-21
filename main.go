@@ -42,6 +42,24 @@ func main() {
 	common.SectionTitle("Step 1 : Gather Old Account Information")
 	SavePlaylistsData()
 
+	common.SectionTitle("Step 2 : Login with new Account")
+
+}
+
+func SavePlaylistsData() {
+
+	user, err := global_client.CurrentUser()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("You are logged in as:", user.ID)
+
+	/* Create an array of playlists */
+	playlists := GrabPlaylists()
+
+	/* Save a dataset of JSON information regarding each playlist */
+	CreatePlaylistDataset(user.ID, playlists)
+
 }
 
 func authorizationHandler() spotify.Client {
@@ -86,92 +104,6 @@ func completeAuth(w http.ResponseWriter, r *http.Request) {
 	ch <- &client
 }
 
-func SavePlaylistsData() {
-
-	user, err := global_client.CurrentUser()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("You are logged in as:", user.ID)
-
-	var playlist_arr []spotify.SimplePlaylist
-
-	for i := 0; i < 3; i++ {
-		lim := 50
-
-		off := i * lim
-
-		if i == 0 {
-			off = 0
-		}
-
-		opt := spotify.Options{
-			Limit:  &lim,
-			Offset: &off,
-		}
-
-		fmt.Println("\tOffset: ", off)
-
-		playlist_list, err := global_client.CurrentUsersPlaylistsOpt(&opt)
-
-		if err != nil {
-			fmt.Println("Playlist Error!")
-			fmt.Fprintf(os.Stderr, err.Error())
-			return
-		}
-
-		if playlist_list != nil {
-			for _, playlist := range playlist_list.Playlists {
-				// fmt.Println(playlist.Name, " ", playlist.Tracks.Total)
-				playlist_arr = append(playlist_arr, playlist)
-			}
-		} else {
-			fmt.Println("All playlists gathered!")
-		}
-	}
-
-	CreateDir("tmp")
-
-	file, err := os.Create("tmp/master.json")
-	writer := bufio.NewWriter(file)
-
-	for _, playlist := range playlist_arr {
-
-		if err != nil {
-			panic(err)
-		}
-		defer file.Close()
-
-		info, _ := json.MarshalIndent(playlist, "", "    ")
-
-		fmt.Fprintln(writer, string(info))
-
-		if playlist.Owner.ID == user.ID {
-			track_filepath := fmt.Sprintf("tmp/%s_tracks.json", filenameHandler(playlist.Name))
-			track_file, _ := os.Create(track_filepath)
-
-			track_writer := bufio.NewWriter(track_file)
-
-			opts := spotify.Options{}
-			fields := "items(added_at,track(name,id))"
-
-			tracks, err := global_client.GetPlaylistTracksOpt(user.ID, playlist.ID, &opts, fields)
-
-			if err != nil {
-				panic(err)
-			}
-
-			for _, track := range tracks.Tracks {
-
-				track_listing, _ := json.MarshalIndent(track, "", "    ")
-				fmt.Fprintln(track_writer, string(track_listing))
-			}
-
-			defer track_file.Close()
-		}
-	}
-}
-
 /* Written by Siong-Ui Te, siongui.github.io */
 func CreateDir(dir string) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -191,4 +123,86 @@ func filenameHandler(filename string) string {
 	processedString := reg.ReplaceAllString(filename, "")
 
 	return processedString
+}
+
+func GrabPlaylists() []spotify.SimplePlaylist {
+
+	lim := 50
+	offset := 0
+	retrieved := 50
+	count := 0
+	var playlists []spotify.SimplePlaylist
+
+	for i := 0; retrieved != 0; i++ {
+		offset = i * lim
+
+		opt := spotify.Options{
+			Limit:  &lim,
+			Offset: &offset,
+		}
+
+		payload, err := global_client.CurrentUsersPlaylistsOpt(&opt)
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, err.Error())
+			return nil
+		}
+
+		retrieved = len(payload.Playlists)
+
+		if retrieved > 0 {
+			for _, playlist := range payload.Playlists {
+				playlists = append(playlists, playlist)
+				count++
+			}
+		}
+	}
+
+	fmt.Println("Retrieved ", count, " playlists.")
+
+	return playlists
+}
+
+func CreatePlaylistDataset(ownerID string, playlists []spotify.SimplePlaylist) {
+
+	CreateDir("tmp")
+	CreateDir("tmp/tracklistings")
+
+	file, err := os.Create("tmp/master.json")
+	writer := bufio.NewWriter(file)
+
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	for _, playlist := range playlists {
+
+		info, _ := json.MarshalIndent(playlist, "", "    ")
+
+		fmt.Fprintln(writer, string(info))
+
+		if playlist.Owner.ID == ownerID {
+			track_filepath := fmt.Sprintf("tmp/tracklistings/%s_tracks.json", filenameHandler(playlist.Name))
+			track_file, _ := os.Create(track_filepath)
+
+			track_writer := bufio.NewWriter(track_file)
+
+			opts := spotify.Options{}
+			fields := "items(added_at,track(name,id,album(name)))"
+
+			tracks, err := global_client.GetPlaylistTracksOpt(ownerID, playlist.ID, &opts, fields)
+
+			if err != nil {
+				panic(err)
+			}
+
+			for _, track := range tracks.Tracks {
+
+				track_listing, _ := json.MarshalIndent(track, "", "    ")
+				fmt.Fprintln(track_writer, string(track_listing))
+			}
+			defer track_file.Close()
+		}
+	}
 }

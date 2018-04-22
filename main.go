@@ -14,17 +14,22 @@ import (
 	"github.com/zmb3/spotify"
 )
 
-var CONFIG_FILE = "key.ini"
-var global_settings map[string]string
-
+const CONFIG_FILE = "key.ini"
 const redirectURI = "http://localhost:8080/callback"
+const secondcallURI = "http://localhost:8080/secondcallback"
 
-var global_client spotify.Client
+var global_settings map[string]string
+var glb_flag bool
 
 var (
 	auth = spotify.NewAuthenticator(redirectURI,
 		spotify.ScopeUserReadPrivate,
-		spotify.ScopePlaylistReadPrivate)
+		spotify.ScopePlaylistReadPrivate,
+		spotify.ScopePlaylistModifyPublic)
+	auth2 = spotify.NewAuthenticator(secondcallURI,
+		spotify.ScopeUserReadPrivate,
+		spotify.ScopePlaylistReadPrivate,
+		spotify.ScopePlaylistModifyPublic)
 	ch    = make(chan *spotify.Client)
 	state = "abc123"
 )
@@ -32,58 +37,116 @@ var (
 func main() {
 
 	global_settings = config.Load_config(CONFIG_FILE,
-		[]string{"Client ID", "Client Secret", "Old User"},
-		[]string{"client_id", "client_secret", "old_user"})
+		[]string{"Client ID", "Client Secret", "Old User", "New User"},
+		[]string{"client_id", "client_secret", "old_user", "new_user"})
 
 	common.SectionTitle("Spotify Migration Assistant")
 
-	global_client = authorizationHandler()
+	// global_client = authorizationHandler()
+	glb_flag = true
+	client := authorizationHandler("/callback", "/", true)
 
 	common.SectionTitle("Step 1 : Gather Old Account Information")
-	SavePlaylistsData()
+	old_playlists := SavePlaylistsData(&client)
 
-	common.SectionTitle("Step 2 : Login with new Account")
+	common.SectionTitle("Step 2 : Populate new Account")
+
+	glb_flag = false
+	newUserClient := authorizationHandler("/secondcallback", "/second/", false)
+
+	PopulateNewAcct(&client, &newUserClient, old_playlists)
 
 }
 
-func SavePlaylistsData() {
+func PopulateNewAcct(oldclient *spotify.Client, newclient *spotify.Client, playlists []spotify.SimplePlaylist) {
 
-	user, err := global_client.CurrentUser()
+	// for _, playlist := range playlists {
+
+	// }
+
+	user, err := oldclient.CurrentUser()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	newPlaylist, err := newclient.CreatePlaylistForUser(global_settings["new_user"], playlists[0].Name, true)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	opts := spotify.Options{}
+	fields := "items(track(name,id))"
+
+	tracks, err := oldclient.GetPlaylistTracksOpt(user.ID, playlists[0].ID, &opts, fields)
+
+	if err != nil {
+		panic(err)
+	}
+
+	for _, track := range tracks.Tracks {
+
+		_, err := newclient.AddTracksToPlaylist(global_settings["new_user"], newPlaylist.ID, track.Track.ID)
+
+		if err != nil {
+			panic(err)
+		}
+	}
+
+}
+
+/*
+ * Save Playlist Data
+ *
+ * Desc: Checks for logged in. If the user has been logged in, an attempt is
+ *	     made to grab all of the playlists from the user. If that is successful,
+ *		 then the data collected is stored in JSON format in an tmp directory
+ *		 to be used for later processing and or backing up of Spotify
+ *		 information
+ *
+ *
+ */
+func SavePlaylistsData(client *spotify.Client) []spotify.SimplePlaylist {
+
+	user, err := client.CurrentUser()
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("You are logged in as:", user.ID)
 
 	/* Create an array of playlists */
-	playlists := GrabPlaylists()
+	playlists := GrabPlaylists(client)
 
 	/* Save a dataset of JSON information regarding each playlist */
 	CreatePlaylistDataset(user.ID, playlists)
 
+	return playlists
 }
 
-func authorizationHandler() spotify.Client {
+func authorizationHandler(callbk string, path string, flag bool) spotify.Client {
 
 	auth.SetAuthInfo(global_settings["client_id"], global_settings["client_secret"])
+	auth2.SetAuthInfo(global_settings["client_id"], global_settings["client_secret"])
 
-	http.HandleFunc("/callback", completeAuth)
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc(callbk, completeAuth)
+
+	http.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		log.Println("Got request for:", r.URL.String())
 	})
 	go http.ListenAndServe(":8080", nil)
 
-	url := auth.AuthURL(state)
-	fmt.Println("Please log in to Spotify by visiting the following page in your browser:", url)
+	var url string
+
+	if flag {
+		url = auth.AuthURL(state)
+	} else {
+		url = auth2.AuthURL(state)
+	}
+
+	fmt.Println("Please log in to Spotify by visiting the following page in your browser:\n", url)
 
 	// wait for auth to complete
 	client := <-ch
-
-	// use the client to make calls that require authorization
-	user, err := client.CurrentUser()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("You are logged in as:", user.ID)
 
 	return *client
 }
@@ -99,7 +162,13 @@ func completeAuth(w http.ResponseWriter, r *http.Request) {
 		log.Fatalf("State mismatch: %s != %s\n", st, state)
 	}
 	// use the token to get an authenticated client
-	client := auth.NewClient(tok)
+	var client spotify.Client
+
+	if glb_flag {
+		client = auth.NewClient(tok)
+	} else {
+		client = auth2.NewClient(tok)
+	}
 	fmt.Fprintf(w, "Login Completed!")
 	ch <- &client
 }
@@ -114,6 +183,10 @@ func CreateDir(dir string) {
 	}
 }
 
+/*
+ * Quickly use a regular expression to compress file names and remove special
+ * characters.
+ */
 func filenameHandler(filename string) string {
 
 	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
@@ -125,12 +198,9 @@ func filenameHandler(filename string) string {
 	return processedString
 }
 
-func GrabPlaylists() []spotify.SimplePlaylist {
+func GrabPlaylists(client *spotify.Client) []spotify.SimplePlaylist {
 
-	lim := 50
-	offset := 0
-	retrieved := 50
-	count := 0
+	lim, offset, retrieved, count := 50, 0, 50, 0
 	var playlists []spotify.SimplePlaylist
 
 	for i := 0; retrieved != 0; i++ {
@@ -141,7 +211,7 @@ func GrabPlaylists() []spotify.SimplePlaylist {
 			Offset: &offset,
 		}
 
-		payload, err := global_client.CurrentUsersPlaylistsOpt(&opt)
+		payload, err := client.CurrentUsersPlaylistsOpt(&opt)
 
 		if err != nil {
 			fmt.Fprintf(os.Stderr, err.Error())
@@ -166,7 +236,7 @@ func GrabPlaylists() []spotify.SimplePlaylist {
 func CreatePlaylistDataset(ownerID string, playlists []spotify.SimplePlaylist) {
 
 	CreateDir("tmp")
-	CreateDir("tmp/tracklistings")
+	// CreateDir("tmp/tracklistings")
 
 	file, err := os.Create("tmp/master.json")
 	writer := bufio.NewWriter(file)
@@ -174,35 +244,33 @@ func CreatePlaylistDataset(ownerID string, playlists []spotify.SimplePlaylist) {
 	if err != nil {
 		panic(err)
 	}
-	defer file.Close()
 
 	for _, playlist := range playlists {
 
 		info, _ := json.MarshalIndent(playlist, "", "    ")
-
 		fmt.Fprintln(writer, string(info))
 
-		if playlist.Owner.ID == ownerID {
-			track_filepath := fmt.Sprintf("tmp/tracklistings/%s_tracks.json", filenameHandler(playlist.Name))
-			track_file, _ := os.Create(track_filepath)
+		// if playlist.Owner.ID == ownerID {
 
-			track_writer := bufio.NewWriter(track_file)
+		// 	track_filepath := fmt.Sprintf("tmp/tracklistings/%s_tracks.json", filenameHandler(playlist.Name))
+		// 	track_file, _ := os.Create(track_filepath)
 
-			opts := spotify.Options{}
-			fields := "items(added_at,track(name,id,album(name)))"
+		// 	track_writer := bufio.NewWriter(track_file)
 
-			tracks, err := global_client.GetPlaylistTracksOpt(ownerID, playlist.ID, &opts, fields)
+		// 	opts := spotify.Options{}
+		// 	fields := "items(added_at,track(name,id,album(name)))"
 
-			if err != nil {
-				panic(err)
-			}
+		// 	tracks, err := client.GetPlaylistTracksOpt(ownerID, playlist.ID, &opts, fields)
 
-			for _, track := range tracks.Tracks {
+		// 	if err != nil {
+		// 		panic(err)
+		// 	}
 
-				track_listing, _ := json.MarshalIndent(track, "", "    ")
-				fmt.Fprintln(track_writer, string(track_listing))
-			}
-			defer track_file.Close()
-		}
+		// 	for _, track := range tracks.Tracks {
+
+		// 		track_listing, _ := json.MarshalIndent(track, "", "    ")
+		// 		fmt.Fprintln(track_writer, string(track_listing))
+		// 	}
+		// }
 	}
 }

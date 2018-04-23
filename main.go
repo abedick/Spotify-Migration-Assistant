@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"time"
 
 	"./common"
 	"./config"
@@ -16,7 +17,7 @@ import (
 
 const CONFIG_FILE = "key.ini"
 const redirectURI = "http://localhost:8080/callback"
-const secondcallURI = "http://localhost:8080/secondcallback"
+const secondcallURI = "http://localhost:8080/callback"
 
 var global_settings map[string]string
 var glb_flag bool
@@ -46,6 +47,8 @@ func main() {
 	glb_flag = true
 	client := authorizationHandler("/callback", "/", true)
 
+	client.AutoRetry = true
+
 	common.SectionTitle("Step 1 : Gather Old Account Information")
 	old_playlists := SavePlaylistsData(&client)
 
@@ -54,45 +57,88 @@ func main() {
 	glb_flag = false
 	newUserClient := authorizationHandler("/secondcallback", "/second/", false)
 
+	newUserClient.AutoRetry = true
+
 	PopulateNewAcct(&client, &newUserClient, old_playlists)
 
 }
 
 func PopulateNewAcct(oldclient *spotify.Client, newclient *spotify.Client, playlists []spotify.SimplePlaylist) {
 
-	// for _, playlist := range playlists {
+	DeleteAll(newclient)
 
-	// }
+	file, err := os.Create("tmp/error.txt")
+	writer := bufio.NewWriter(file)
+
+	if err != nil {
+		panic(err)
+	}
 
 	user, err := oldclient.CurrentUser()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	newPlaylist, err := newclient.CreatePlaylistForUser(global_settings["new_user"], playlists[0].Name, true)
+	for _, playlist := range playlists {
 
-	if err != nil {
-		log.Fatal(err)
-	}
+		/* User created playlists else follwing playlists */
+		if playlist.Owner.ID == user.ID {
 
-	opts := spotify.Options{}
-	fields := "items(track(name,id))"
+			/* Grab the tracks from the old playlist */
+			opts := spotify.Options{}
+			fields := "items(track(name,id))"
 
-	tracks, err := oldclient.GetPlaylistTracksOpt(user.ID, playlists[0].ID, &opts, fields)
+			tracks, err := oldclient.GetPlaylistTracksOpt(user.ID, playlist.ID, &opts, fields)
 
-	if err != nil {
-		panic(err)
-	}
+			if err != nil {
+				panic(err)
+			}
 
-	for _, track := range tracks.Tracks {
+			/* Add each track to the new user or save an error */
+			fmt.Println("Attempting to add: ", playlist.Name)
 
-		_, err := newclient.AddTracksToPlaylist(global_settings["new_user"], newPlaylist.ID, track.Track.ID)
+			var newPlaylist *spotify.FullPlaylist
 
-		if err != nil {
-			panic(err)
+			for i, track := range tracks.Tracks {
+
+				if i == 0 {
+
+					/* Create the new playlist for the new user */
+					var newPlaylistName string
+					/* Get the month and day first track was addded */
+
+					if track.AddedAt == "" {
+						newPlaylistName = playlist.Name
+					} else {
+						addtime, _ := time.Parse("April 2006", track.AddedAt)
+						newPlaylistName = fmt.Sprintf("%s (%s)", playlist.Name, addtime)
+					}
+
+					newPlaylist, err = newclient.CreatePlaylistForUser(global_settings["new_user"], newPlaylistName, true)
+
+					if err != nil {
+						log.Fatal(err)
+					}
+				}
+
+				_, err := newclient.AddTracksToPlaylist(global_settings["new_user"], newPlaylist.ID, track.Track.ID)
+
+				if err != nil {
+					err_msg := fmt.Sprintf("Could not add %s to playlist %s", track.Track.Name, playlist.Name)
+					fmt.Fprintln(writer, err_msg)
+					fmt.Println(err_msg)
+				}
+			}
+
+		} else {
+
+			err := newclient.FollowPlaylist(spotify.ID(playlist.Owner.ID), playlist.ID, true)
+
+			if err != nil {
+				panic(err)
+			}
 		}
 	}
-
 }
 
 /*
@@ -133,7 +179,12 @@ func authorizationHandler(callbk string, path string, flag bool) spotify.Client 
 	http.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		log.Println("Got request for:", r.URL.String())
 	})
-	go http.ListenAndServe(":8080", nil)
+
+	if flag {
+		go http.ListenAndServe(":8080", nil)
+	} else {
+		go http.ListenAndServe(":8080", nil)
+	}
 
 	var url string
 
@@ -273,4 +324,33 @@ func CreatePlaylistDataset(ownerID string, playlists []spotify.SimplePlaylist) {
 		// 	}
 		// }
 	}
+}
+
+func DeleteAll(client *spotify.Client) {
+
+	user, err := client.CurrentUser()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Unfollowing all playlists for user: ", user.ID)
+	var value string
+	fmt.Scanln(&value)
+
+	playlists, err := client.GetPlaylistsForUser(global_settings["new_user"])
+
+	if err != nil {
+		panic(err)
+	}
+
+	for _, playlist := range playlists.Playlists {
+
+		err := client.UnfollowPlaylist(spotify.ID(playlist.Owner.ID), playlist.ID)
+
+		if err != nil {
+			fmt.Println("Could not remove ", playlist.Name)
+			panic(err)
+		}
+	}
+
 }

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"time"
 
 	"./common"
 	"./config"
@@ -17,17 +16,11 @@ import (
 
 const CONFIG_FILE = "key.ini"
 const redirectURI = "http://localhost:8080/callback"
-const secondcallURI = "http://localhost:8080/callback"
 
 var global_settings map[string]string
-var glb_flag bool
 
 var (
 	auth = spotify.NewAuthenticator(redirectURI,
-		spotify.ScopeUserReadPrivate,
-		spotify.ScopePlaylistReadPrivate,
-		spotify.ScopePlaylistModifyPublic)
-	auth2 = spotify.NewAuthenticator(secondcallURI,
 		spotify.ScopeUserReadPrivate,
 		spotify.ScopePlaylistReadPrivate,
 		spotify.ScopePlaylistModifyPublic)
@@ -43,20 +36,17 @@ func main() {
 
 	common.SectionTitle("Spotify Migration Assistant")
 
-	// global_client = authorizationHandler()
-	glb_flag = true
-	client := authorizationHandler("/callback", "/", true)
-
+	client := authorizationHandler("/callback", "/")
 	client.AutoRetry = true
 
 	common.SectionTitle("Step 1 : Gather Old Account Information")
+	SavePlaylistsData(&client)
+
 	old_playlists := SavePlaylistsData(&client)
 
 	common.SectionTitle("Step 2 : Populate new Account")
 
-	glb_flag = false
-	newUserClient := authorizationHandler("/secondcallback", "/second/", false)
-
+	newUserClient := authorizationHandler("/secondcallback", "/second/")
 	newUserClient.AutoRetry = true
 
 	PopulateNewAcct(&client, &newUserClient, old_playlists)
@@ -67,17 +57,10 @@ func PopulateNewAcct(oldclient *spotify.Client, newclient *spotify.Client, playl
 
 	DeleteAll(newclient)
 
-	file, err := os.Create("tmp/error.txt")
+	file, _ := os.Create("tmp/error.txt")
 	writer := bufio.NewWriter(file)
 
-	if err != nil {
-		panic(err)
-	}
-
-	user, err := oldclient.CurrentUser()
-	if err != nil {
-		log.Fatal(err)
-	}
+	user, _ := oldclient.CurrentUser()
 
 	for _, playlist := range playlists {
 
@@ -85,10 +68,7 @@ func PopulateNewAcct(oldclient *spotify.Client, newclient *spotify.Client, playl
 		if playlist.Owner.ID == user.ID {
 
 			/* Grab the tracks from the old playlist */
-			opts := spotify.Options{}
-			fields := "items(track(name,id))"
-
-			tracks, err := oldclient.GetPlaylistTracksOpt(user.ID, playlist.ID, &opts, fields)
+			tracks, err := oldclient.GetPlaylistTracksOpt(user.ID, playlist.ID, &spotify.Options{}, "items(track(name,id))")
 
 			if err != nil {
 				panic(err)
@@ -97,34 +77,17 @@ func PopulateNewAcct(oldclient *spotify.Client, newclient *spotify.Client, playl
 			/* Add each track to the new user or save an error */
 			fmt.Println("Attempting to add: ", playlist.Name)
 
-			var newPlaylist *spotify.FullPlaylist
+			newPlaylist, err := newclient.CreatePlaylistForUser(global_settings["new_user"], playlist.Name, true)
 
-			for i, track := range tracks.Tracks {
-
-				if i == 0 {
-
-					/* Create the new playlist for the new user */
-					var newPlaylistName string
-					/* Get the month and day first track was addded */
-
-					if track.AddedAt == "" {
-						newPlaylistName = playlist.Name
-					} else {
-						addtime, _ := time.Parse("April 2006", track.AddedAt)
-						newPlaylistName = fmt.Sprintf("%s (%s)", playlist.Name, addtime)
-					}
-
-					newPlaylist, err = newclient.CreatePlaylistForUser(global_settings["new_user"], newPlaylistName, true)
-
-					if err != nil {
-						log.Fatal(err)
-					}
-				}
+			if err != nil {
+				log.Fatal(err)
+			}
+			for _, track := range tracks.Tracks {
 
 				_, err := newclient.AddTracksToPlaylist(global_settings["new_user"], newPlaylist.ID, track.Track.ID)
 
 				if err != nil {
-					err_msg := fmt.Sprintf("Could not add %s to playlist %s", track.Track.Name, playlist.Name)
+					err_msg := fmt.Sprintf("Could not add %s to playlist %s.", track.Track.Name, playlist.Name)
 					fmt.Fprintln(writer, err_msg)
 					fmt.Println(err_msg)
 				}
@@ -135,7 +98,9 @@ func PopulateNewAcct(oldclient *spotify.Client, newclient *spotify.Client, playl
 			err := newclient.FollowPlaylist(spotify.ID(playlist.Owner.ID), playlist.ID, true)
 
 			if err != nil {
-				panic(err)
+				err_msg := fmt.Sprintf("Could not follow %s.", playlist.Name)
+				fmt.Fprintln(writer, err_msg)
+				fmt.Println(err_msg)
 			}
 		}
 	}
@@ -160,8 +125,12 @@ func SavePlaylistsData(client *spotify.Client) []spotify.SimplePlaylist {
 	}
 	fmt.Println("You are logged in as:", user.ID)
 
+	fmt.Println("Grabbing all playlists")
+
 	/* Create an array of playlists */
 	playlists := GrabPlaylists(client)
+
+	fmt.Println("Found ", len(playlists), " playlists.")
 
 	/* Save a dataset of JSON information regarding each playlist */
 	CreatePlaylistDataset(user.ID, playlists)
@@ -169,10 +138,9 @@ func SavePlaylistsData(client *spotify.Client) []spotify.SimplePlaylist {
 	return playlists
 }
 
-func authorizationHandler(callbk string, path string, flag bool) spotify.Client {
+func authorizationHandler(callbk string, path string) spotify.Client {
 
 	auth.SetAuthInfo(global_settings["client_id"], global_settings["client_secret"])
-	auth2.SetAuthInfo(global_settings["client_id"], global_settings["client_secret"])
 
 	http.HandleFunc(callbk, completeAuth)
 
@@ -180,19 +148,9 @@ func authorizationHandler(callbk string, path string, flag bool) spotify.Client 
 		log.Println("Got request for:", r.URL.String())
 	})
 
-	if flag {
-		go http.ListenAndServe(":8080", nil)
-	} else {
-		go http.ListenAndServe(":8080", nil)
-	}
+	go http.ListenAndServe(":8080", nil)
 
-	var url string
-
-	if flag {
-		url = auth.AuthURL(state)
-	} else {
-		url = auth2.AuthURL(state)
-	}
+	url := auth.AuthURL(state)
 
 	fmt.Println("Please log in to Spotify by visiting the following page in your browser:\n", url)
 
@@ -215,11 +173,8 @@ func completeAuth(w http.ResponseWriter, r *http.Request) {
 	// use the token to get an authenticated client
 	var client spotify.Client
 
-	if glb_flag {
-		client = auth.NewClient(tok)
-	} else {
-		client = auth2.NewClient(tok)
-	}
+	client = auth.NewClient(tok)
+
 	fmt.Fprintf(w, "Login Completed!")
 	ch <- &client
 }
@@ -251,7 +206,7 @@ func filenameHandler(filename string) string {
 
 func GrabPlaylists(client *spotify.Client) []spotify.SimplePlaylist {
 
-	lim, offset, retrieved, count := 50, 0, 50, 0
+	lim, offset, retrieved := 50, 0, 50
 	var playlists []spotify.SimplePlaylist
 
 	for i := 0; retrieved != 0; i++ {
@@ -274,12 +229,9 @@ func GrabPlaylists(client *spotify.Client) []spotify.SimplePlaylist {
 		if retrieved > 0 {
 			for _, playlist := range payload.Playlists {
 				playlists = append(playlists, playlist)
-				count++
 			}
 		}
 	}
-
-	fmt.Println("Retrieved ", count, " playlists.")
 
 	return playlists
 }
